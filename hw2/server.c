@@ -73,8 +73,7 @@ static void process_requests(int listen_socket){
         }
 
         printf("\t RECEIVED REQ...\n");
-
-        /*
+         /*
          * TODO:  Handle the rest of the loop, basically you need to:
          *
          *      call recv() to get the request from the client
@@ -88,16 +87,18 @@ static void process_requests(int listen_socket){
          *      process_recv_packet(pcktPointer, recv_buffer, &msgPointer, &msgLen);
          * 
          */
+        ret = recv(data_socket, recv_buffer, sizeof(recv_buffer), 0);
+        if (ret == -1) {
+            perror("recv");
+            close(data_socket);
+            continue;
+        }
 
-        //TODO:  DELETE THESE VARIABLES BELOW...
-        //SEE THE COMMENT ABOVE, THESE VARIABLES ARE JUST PUT IN HERE FOR NOW TO MAKE SURE
-        //THE STUB COMPILES
-        cs472_proto_header_t *pcktPointer;
+        cs472_proto_header_t *pcktPointer = (cs472_proto_header_t *)recv_buffer;
         uint8_t *msgPointer = NULL;
         uint8_t msgLen = 0;
+        process_recv_packet(pcktPointer, recv_buffer, &msgPointer, &msgLen);
 
-        //Now lets setup to process the request and send a reply, create a copy of the header
-        //also switch header direction
         memcpy(&header, pcktPointer, sizeof(cs472_proto_header_t)); //start building rsp header
         header.dir = DIR_RECV;
         switch(header.cmd){
@@ -118,12 +119,14 @@ static void process_requests(int listen_socket){
                 close(data_socket);
                 continue;
         }
+        ret = send(data_socket, send_buffer, header.len, 0);
+        if (ret == -1) {
+            perror("send");
+            close(data_socket);
+            continue;
+        }
 
-        /*
-         * TODO:  Now that we have processed things, send the response back to the 
-         *        client - hint - its in the send_buffer. also dont forget to close
-         *        the data_socket for the next request.
-         */       
+        close(data_socket);
     }
 }
 

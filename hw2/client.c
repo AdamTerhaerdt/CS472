@@ -142,6 +142,24 @@ static void start_client(cs472_proto_header_t *header, uint8_t *packet){
      *      send() - recall that the formatted packet is passed in
      *      recv() - get the response back from the server
      */
+    ret = connect(data_socket, (struct sockaddr *)&addr, sizeof(struct sockaddr_in));
+    if (ret == -1) {
+        perror("connect");
+        exit(EXIT_FAILURE);
+    }
+
+    ret = send(data_socket, packet, header->len, 0);
+    if (ret == -1) {
+        perror("send");
+        exit(EXIT_FAILURE);
+    }
+    
+    ret = recv(data_socket, recv_buffer, BUFF_SZ, 0);
+    if (ret == -1) {
+        perror("recv");
+        exit(EXIT_FAILURE);
+    }
+
     
     cs472_proto_header_t *pcktPointer = (cs472_proto_header_t *)recv_buffer;
     uint8_t *msgPointer = NULL;
