@@ -75,7 +75,7 @@ static void init_header(cs472_proto_header_t *header, int req_cmd, char *reqData
     header->ver = PROTO_VER_1;
     header->dir = DIR_SEND;
     header->atm = 0;
-    header->ay = 2022;
+    header->ay = 2025;
 
     //switch based on the command
     switch(req_cmd){
