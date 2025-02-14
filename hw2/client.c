@@ -71,7 +71,6 @@ static void init_header(cs472_proto_header_t *header, int req_cmd, char *reqData
 
     header->proto = PROTO_CS_FUN;
     header->cmd = req_cmd;
-     //TODO: Setup other header fields, eg., header->ver, header->dir, header->atm, header->ay
     header->ver = PROTO_VER_1;
     header->dir = DIR_SEND;
     header->atm = 0;
@@ -132,16 +131,7 @@ static void start_client(cs472_proto_header_t *header, uint8_t *packet){
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = inet_addr("127.0.0.1");
     addr.sin_port = htons(PORT_NUM);
-
-    /*
-     * TODO:  The next things you need to do is to handle the cleint
-     * socket to send things to the server, basically make the following
-     * calls:
-     * 
-     *      connect()
-     *      send() - recall that the formatted packet is passed in
-     *      recv() - get the response back from the server
-     */
+    
     ret = connect(data_socket, (struct sockaddr *)&addr, sizeof(struct sockaddr_in));
     if (ret == -1) {
         perror("connect");

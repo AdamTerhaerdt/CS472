@@ -73,20 +73,6 @@ static void process_requests(int listen_socket){
         }
 
         printf("\t RECEIVED REQ...\n");
-         /*
-         * TODO:  Handle the rest of the loop, basically you need to:
-         *
-         *      call recv() to get the request from the client
-         * 
-         *      Here is some helper code after you receive data from the client.  This
-         *      helps get setup to actually process the client request
-         * 
-         *      cs472_proto_header_t *pcktPointer =  (cs472_proto_header_t *)recv_buffer;
-         *      uint8_t *msgPointer = NULL;
-         *      uint8_t msgLen = 0;
-         *      process_recv_packet(pcktPointer, recv_buffer, &msgPointer, &msgLen);
-         * 
-         */
         ret = recv(data_socket, recv_buffer, sizeof(recv_buffer), 0);
         if (ret == -1) {
             perror("recv");
@@ -95,8 +81,6 @@ static void process_requests(int listen_socket){
         }
 
         cs472_proto_header_t *pcktPointer = (cs472_proto_header_t *)recv_buffer;
-        uint8_t *msgPointer = NULL;
-        uint8_t msgLen = 0;
         process_recv_packet(pcktPointer, recv_buffer, &msgPointer, &msgLen);
 
         memcpy(&header, pcktPointer, sizeof(cs472_proto_header_t)); //start building rsp header
