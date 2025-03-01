@@ -1,0 +1,27 @@
+Author: Adam Terhaerdt
+Date: 2025-03-01
+Class: CS 472
+Assignment: 3
+
+Timing results for client-cc:
+Run 1: 0.001173 seconds
+Run 2: 0.001385 seconds
+Run 3: 0.001591 seconds
+
+Timing results for client-ka:
+Run 1: 0.000832 seconds
+Run 2: 0.000857 seconds
+Run 3: 0.000769 seconds
+
+
+**Explain if you saw improved response time with using Keep-Alive or not, and why you think you 
+got about the same, worse or better response time between the two different program versions.**
+
+When testing both the Connection: Close and Connection: Keep-Alive headers, I saw that the 
+Connection: Keep-Alive header had a faster response time. This is because the Connection: Keep-Alive 
+header allows the server to reuse the same connection for multiple requests, which reduces the 
+time it takes to establish a new connection for each request. This is why I think that the 
+Connection: Keep-Alive header had a faster response time.
+
+
+
