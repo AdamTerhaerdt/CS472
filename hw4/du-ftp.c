@@ -4,15 +4,16 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <getopt.h>
+#include <sys/stat.h>
 
 #include "du-ftp.h"
 #include "du-proto.h"
 
-
-#define BUFF_SZ 4096
+#define BUFF_SZ DUFTP_MAX_DATA_SIZE
 static char sbuffer[BUFF_SZ];
 static char rbuffer[BUFF_SZ];
 static char full_file_path[FNAME_SZ];
+static int sequence_number = 0;
 
 /*
  *  Helper function that processes the command line arguements.  Highlights
@@ -75,150 +76,246 @@ static int initParams(int argc, char *argv[], prog_config *cfg){
 
 int server_loop(dp_connp dpc, void *sBuff, void *rBuff, int sbuff_sz, int rbuff_sz){
     int rcvSz;
-    duftp_pdu pdu;
+    duftp_pdu recv_pdu;
+    duftp_pdu send_pdu;
     FILE *f = NULL;
-    bool file_opened = false;
+    char output_filename[FNAME_SZ];
+    int total_bytes_received = 0;
+    int expected_seq_num = 0;
 
     if (dpc->isConnected == false){
         perror("Expecting the protocol to be in connect state, but its not");
         exit(-1);
     }
+
+    sequence_number = 0;
+    
+    printf("Server waiting for file transfer...\n");
     
     //Loop until a disconnect is received, or error happens
     while(1) {
-        //receive request from client
-        rcvSz = dprecv(dpc, rBuff, rbuff_sz);
+        //Receive PDU from client
+        rcvSz = dprecv(dpc, &recv_pdu, sizeof(duftp_pdu));
         if (rcvSz == DP_CONNECTION_CLOSED){
-            if (file_opened) {
+            if (f != NULL) {
                 fclose(f);
             }
             printf("Client closed connection\n");
             return DP_CONNECTION_CLOSED;
         }
         
-        // Process based on PDU message type
-        memcpy(&pdu, rBuff, sizeof(duftp_pdu));
+        //Check sequence number
+        if (recv_pdu.seq_num != expected_seq_num) {
+            printf("Warning: Received out-of-sequence packet. Expected %d, got %d\n", 
+                   expected_seq_num, recv_pdu.seq_num);
+        }
+        expected_seq_num = recv_pdu.seq_num + 1;
         
-        switch(pdu.msg_type) {
+        //Process based on message type
+        switch (recv_pdu.msg_type) {
             case DUFTP_MSG_FILENAME:
-                // Client is sending a filename
-                strncpy(full_file_path, "./infile/", FNAME_SZ);
-                strncat(full_file_path, pdu.filename, FNAME_SZ - strlen(full_file_path) - 1);
-                
-                f = fopen(full_file_path, "wb+");
-                if(f == NULL){
-                    printf("ERROR: Cannot open file %s\n", full_file_path);
-                    // Send error response
-                    pdu.msg_type = DUFTP_MSG_ERROR;
-                    pdu.error_code = DUFTP_ERR_FILE_NOT_FOUND;
-                    dpsend(dpc, &pdu, sizeof(duftp_pdu));
-                } else {
-                    file_opened = true;
-                    // Send acknowledgment
-                    pdu.msg_type = DUFTP_MSG_FILENAME;
-                    pdu.error_code = DUFTP_ERR_NONE;
-                    dpsend(dpc, &pdu, sizeof(duftp_pdu));
+                printf("Receiving file: %s (size: %d bytes)\n", 
+                       recv_pdu.filename, recv_pdu.total_size);
+                snprintf(output_filename, sizeof(output_filename), "./infile/%s", recv_pdu.filename);
+                f = fopen(output_filename, "wb+");
+                if (f == NULL) {
+                    printf("ERROR: Cannot open file %s for writing\n", output_filename);
+                    memset(&send_pdu, 0, sizeof(send_pdu));
+                    send_pdu.msg_type = DUFTP_MSG_ERROR;
+                    send_pdu.protocol_ver = DUFTP_PROTOCOL_VER;
+                    send_pdu.seq_num = sequence_number++;
+                    send_pdu.error_code = DUFTP_ERR_FILE_NOT_FOUND;  
+                    dpsend(dpc, &send_pdu, sizeof(duftp_pdu));
+                    return -1;
                 }
-                printf("Received filename: %s\n", pdu.filename);
+                
+                //Send acknowledgment
+                memset(&send_pdu, 0, sizeof(send_pdu));
+                send_pdu.msg_type = DUFTP_MSG_ACK;
+                send_pdu.protocol_ver = DUFTP_PROTOCOL_VER;
+                send_pdu.seq_num = sequence_number++;
+                
+                dpsend(dpc, &send_pdu, sizeof(duftp_pdu));
                 break;
                 
             case DUFTP_MSG_DATA:
-                if (!file_opened) {
-                    printf("ERROR: Received data before file was opened\n");
-                    pdu.msg_type = DUFTP_MSG_ERROR;
-                    pdu.error_code = DUFTP_ERR_UNKNOWN;
-                    dpsend(dpc, &pdu, sizeof(duftp_pdu));
-                    continue;
+                if (f == NULL) {
+                    printf("ERROR: Received data without filename\n");
+                    memset(&send_pdu, 0, sizeof(send_pdu));
+                    send_pdu.msg_type = DUFTP_MSG_ERROR;
+                    send_pdu.protocol_ver = DUFTP_PROTOCOL_VER;
+                    send_pdu.seq_num = sequence_number++;
+                    send_pdu.error_code = DUFTP_ERR_UNKNOWN;
+                    
+                    dpsend(dpc, &send_pdu, sizeof(duftp_pdu));
+                    return -1;
                 }
+                fwrite(recv_pdu.data, 1, recv_pdu.data_size, f);
+                total_bytes_received += recv_pdu.data_size;
                 
-                // Write data to file
-                fwrite((char*)rBuff + sizeof(duftp_pdu), 1, pdu.data_size, f);
-                printf("Received %d bytes of data\n", pdu.data_size);
+                printf("Received %d bytes (total: %d)\n", 
+                       recv_pdu.data_size, total_bytes_received);
+                
+                //Send acknowledgment
+                memset(&send_pdu, 0, sizeof(send_pdu));
+                send_pdu.msg_type = DUFTP_MSG_ACK;
+                send_pdu.protocol_ver = DUFTP_PROTOCOL_VER;
+                send_pdu.seq_num = sequence_number++;
+                
+                dpsend(dpc, &send_pdu, sizeof(duftp_pdu));
                 break;
                 
             case DUFTP_MSG_COMPLETE:
-                printf("File transfer complete\n");
-                if (file_opened) {
+                //File transfer complete
+                printf("File transfer complete: %d bytes received\n", total_bytes_received);
+                
+                if (f != NULL) {
                     fclose(f);
-                    file_opened = false;
+                    f = NULL;
                 }
-                // Send acknowledgment
-                pdu.msg_type = DUFTP_MSG_COMPLETE;
-                pdu.error_code = DUFTP_ERR_NONE;
-                dpsend(dpc, &pdu, sizeof(duftp_pdu));
-                break;
+                memset(&send_pdu, 0, sizeof(send_pdu));
+                send_pdu.msg_type = DUFTP_MSG_ACK;
+                send_pdu.protocol_ver = DUFTP_PROTOCOL_VER;
+                send_pdu.seq_num = sequence_number++;
+                
+                dpsend(dpc, &send_pdu, sizeof(duftp_pdu));
+                printf("Waiting for client to disconnect...\n");
+                return 0;
                 
             case DUFTP_MSG_ERROR:
-                printf("Received error from client: %d\n", pdu.error_code);
+                printf("Error from client: %d\n", recv_pdu.error_code);
+                
+                if (f != NULL) {
+                    fclose(f);
+                    f = NULL;
+                }
                 break;
                 
             default:
-                printf("Unknown message type: %d\n", pdu.msg_type);
+                printf("Unknown message type: %d\n", recv_pdu.msg_type);
                 break;
         }
     }
 }
 
 void start_client(dp_connp dpc){
-    duftp_pdu pdu;
-    char data_buffer[BUFF_SZ - sizeof(duftp_pdu)];
-    int bytes_read;
+    duftp_pdu send_pdu;
+    duftp_pdu recv_pdu;
+    struct stat file_stat;
+    int bytes_read = 0;
+    int total_bytes_sent = 0;
+    FILE *f;
+    int rcvSz;
 
     if(!dpc->isConnected) {
         printf("Client not connected\n");
         return;
     }
 
-    FILE *f = fopen(full_file_path, "rb");
+    f = fopen(full_file_path, "rb");
     if(f == NULL){
         printf("ERROR: Cannot open file %s\n", full_file_path);
         exit(-1);
     }
+    stat(full_file_path, &file_stat);
+    long file_size = file_stat.st_size;
+
+    char *filename = strrchr(full_file_path, '/');
+    if (filename == NULL) {
+        filename = full_file_path;
+    } else {
+        filename++; 
+    }
     
-    // First, send the filename
-    memset(&pdu, 0, sizeof(duftp_pdu));
-    pdu.msg_type = DUFTP_MSG_FILENAME;
-    pdu.error_code = DUFTP_ERR_NONE;
-    strncpy(pdu.filename, strrchr(full_file_path, '/') + 1, FNAME_SZ - 1);
+    sequence_number = 0;
+
+    memset(&send_pdu, 0, sizeof(send_pdu));
+    send_pdu.msg_type = DUFTP_MSG_FILENAME;
+    send_pdu.protocol_ver = DUFTP_PROTOCOL_VER;
+    send_pdu.seq_num = sequence_number++;
+    send_pdu.data_size = 0;
+    send_pdu.total_size = file_size;
+    strncpy(send_pdu.filename, filename, FNAME_SZ - 1);
     
-    dpsend(dpc, &pdu, sizeof(duftp_pdu));
+    printf("Sending file: %s (size: %ld bytes)\n", filename, file_size);
     
-    // Wait for server acknowledgment
-    dprecv(dpc, &pdu, sizeof(duftp_pdu));
-    if (pdu.msg_type == DUFTP_MSG_ERROR) {
-        printf("Server reported error: %d\n", pdu.error_code);
+    dpsend(dpc, &send_pdu, sizeof(duftp_pdu));
+
+    rcvSz = dprecv(dpc, &recv_pdu, sizeof(duftp_pdu));
+    if (rcvSz == DP_CONNECTION_CLOSED) {
+        printf("Server closed connection\n");
         fclose(f);
-        dpdisconnect(dpc);
         return;
     }
     
-    // Send file data in chunks
-    while ((bytes_read = fread(data_buffer, 1, sizeof(data_buffer), f)) > 0) {
-        pdu.msg_type = DUFTP_MSG_DATA;
-        pdu.data_size = bytes_read;
-        
-        // Copy PDU header to send buffer
-        memcpy(sbuffer, &pdu, sizeof(duftp_pdu));
-        // Copy file data after PDU header
-        memcpy(sbuffer + sizeof(duftp_pdu), data_buffer, bytes_read);
-        
-        // Send combined PDU header and data
-        dpsend(dpc, sbuffer, sizeof(duftp_pdu) + bytes_read);
+    if (recv_pdu.msg_type == DUFTP_MSG_ERROR) {
+        printf("Error from server: %d\n", recv_pdu.error_code);
+        fclose(f);
+        return;
     }
     
-    // Send completion message
-    pdu.msg_type = DUFTP_MSG_COMPLETE;
-    pdu.data_size = 0;
-    dpsend(dpc, &pdu, sizeof(duftp_pdu));
+    if (recv_pdu.msg_type != DUFTP_MSG_ACK) {
+        printf("Unexpected response from server: %d\n", recv_pdu.msg_type);
+        fclose(f);
+        return;
+    }
     
-    // Wait for server acknowledgment
-    dprecv(dpc, &pdu, sizeof(duftp_pdu));
+    while ((bytes_read = fread(send_pdu.data, 1, DUFTP_MAX_DATA_SIZE, f)) > 0) {
+        send_pdu.msg_type = DUFTP_MSG_DATA;
+        send_pdu.protocol_ver = DUFTP_PROTOCOL_VER;
+        send_pdu.seq_num = sequence_number++;
+        send_pdu.data_size = bytes_read;
+        
+        dpsend(dpc, &send_pdu, sizeof(duftp_pdu));
+        total_bytes_sent += bytes_read;
+        
+        printf("Sent %d bytes (total: %d/%ld)\n", bytes_read, total_bytes_sent, file_size);
+
+        rcvSz = dprecv(dpc, &recv_pdu, sizeof(duftp_pdu));
+        if (rcvSz == DP_CONNECTION_CLOSED) {
+            printf("Server closed connection\n");
+            fclose(f);
+            return;
+        }
+        
+        if (recv_pdu.msg_type != DUFTP_MSG_ACK) {
+            printf("Unexpected response from server: %d\n", recv_pdu.msg_type);
+            fclose(f);
+            return;
+        }
+    }
+    
+    memset(&send_pdu, 0, sizeof(send_pdu));
+    send_pdu.msg_type = DUFTP_MSG_COMPLETE;
+    send_pdu.protocol_ver = DUFTP_PROTOCOL_VER;
+    send_pdu.seq_num = sequence_number++;
+    send_pdu.data_size = 0;
+    
+    dpsend(dpc, &send_pdu, sizeof(duftp_pdu));
+    
+    rcvSz = dprecv(dpc, &recv_pdu, sizeof(duftp_pdu));
+    if (rcvSz == DP_CONNECTION_CLOSED) {
+        printf("Server closed connection\n");
+        fclose(f);
+        return;
+    }
+    
+    if (recv_pdu.msg_type != DUFTP_MSG_ACK) {
+        printf("Unexpected response from server: %d\n", recv_pdu.msg_type);
+        fclose(f);
+        return;
+    }
+    
+    printf("File transfer complete: %d bytes sent\n", total_bytes_sent);
     
     fclose(f);
+    
+    printf("Disconnecting from server...\n");
     dpdisconnect(dpc);
 }
 
 void start_server(dp_connp dpc){
+    printf("Server started. Waiting for connections...\n");
     server_loop(dpc, sbuffer, rbuffer, sizeof(sbuffer), sizeof(rbuffer));
 }
 
@@ -230,9 +327,7 @@ int main(int argc, char *argv[])
     dp_connp dpc;
     int rc;
 
-
-    //Process the parameters and init the header - look at the helpers
-    //in the cs472-pproto.c file
+    // Process the parameters and init the header
     cmd = initParams(argc, argv, &cfg);
 
     printf("MODE %d\n", cfg.prog_mode);
@@ -241,9 +336,9 @@ int main(int argc, char *argv[])
 
     switch(cmd){
         case PROG_MD_CLI:
-            //by default client will look for files in the ./outfile directory
+            // For client, we still need the file path to read from
             snprintf(full_file_path, sizeof(full_file_path), "./outfile/%s", cfg.file_name);
-            dpc = dpClientInit(cfg.svr_ip_addr,cfg.port_number);
+            dpc = dpClientInit(cfg.svr_ip_addr, cfg.port_number);
             rc = dpconnect(dpc);
             if (rc < 0) {
                 perror("Error establishing connection");
@@ -255,8 +350,6 @@ int main(int argc, char *argv[])
             break;
 
         case PROG_MD_SVR:
-            //by default server will look for files in the ./infile directory
-            snprintf(full_file_path, sizeof(full_file_path), "./infile/%s", cfg.file_name);
             dpc = dpServerInit(cfg.port_number);
             rc = dplisten(dpc);
             if (rc < 0) {
@@ -267,7 +360,7 @@ int main(int argc, char *argv[])
             start_server(dpc);
             break;
         default:
-            printf("ERROR: Unknown Program Mode.  Mode set is %d\n", cmd);
+            printf("ERROR: Unknown Program Mode. Mode set is %d\n", cmd);
             break;
     }
 }
