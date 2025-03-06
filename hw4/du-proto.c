@@ -117,20 +117,38 @@ dp_connp dpClientInit(char *addr, int port) {
     return dpc;
 }
 
-
-int dprecv(dp_connp dp, void *buff, int buff_sz){
-
-    dp_pdu *inPdu;
-    int rcvLen = dprecvdgram(dp, _dpBuffer, sizeof(_dpBuffer));
-
-    if(rcvLen == DP_CONNECTION_CLOSED)
-        return DP_CONNECTION_CLOSED;
-
-    inPdu = (dp_pdu *)_dpBuffer;
-    if(rcvLen > sizeof(dp_pdu))
-        memcpy(buff, (_dpBuffer+sizeof(dp_pdu)), inPdu->dgram_sz);
-
-    return inPdu->dgram_sz;
+int dprecv(dp_connp dp, void *buff, int buff_sz) {
+    if(buff_sz <= dpmaxdgram()) {
+        return dprecvdgram(dp, _dpBuffer, sizeof(_dpBuffer));
+    }
+    
+    int totalReceived = 0;
+    char *currentPos = (char *)buff;
+    int remaining = buff_sz;
+    
+    while(remaining > 0) {
+        int rcvLen = dprecvdgram(dp, _dpBuffer, sizeof(_dpBuffer));
+        
+        if(rcvLen == DP_CONNECTION_CLOSED)
+            return (totalReceived > 0) ? totalReceived : DP_CONNECTION_CLOSED;
+        
+        if(rcvLen < 0)
+            return (totalReceived > 0) ? totalReceived : rcvLen;
+        dp_pdu *inPdu = (dp_pdu *)_dpBuffer;
+        int dataSize = inPdu->dgram_sz;
+        
+        if(rcvLen > sizeof(dp_pdu) && dataSize > 0) {
+            int copySize = (dataSize <= remaining) ? dataSize : remaining;
+            memcpy(currentPos, (_dpBuffer + sizeof(dp_pdu)), copySize);
+            totalReceived += copySize;
+            currentPos += copySize;
+            remaining -= copySize;
+        }
+        if(dataSize == 0 || remaining == 0)
+            break;
+    }
+    
+    return totalReceived;
 }
 
 
@@ -244,17 +262,34 @@ static int dprecvraw(dp_connp dp, void *buff, int buff_sz){
     return bytes;
 }
 
-int dpsend(dp_connp dp, void *sbuff, int sbuff_sz){
-
-
-    //For now, we will not be able to send larger than the biggest datagram
-    if(sbuff_sz > dpmaxdgram()) {
-        return DP_BUFF_UNDERSIZED;
+int dpsend(dp_connp dp, void *sbuff, int sbuff_sz) {
+    // If data is too large to send in one go, break it into multiple sends
+    if(sbuff_sz <= dpmaxdgram()) {
+        return dpsenddgram(dp, sbuff, sbuff_sz);
     }
-
-    int sndSz = dpsenddgram(dp, sbuff, sbuff_sz);
-
-    return sndSz;
+    
+    // For larger data, send in chunks
+    int totalSent = 0;
+    int remaining = sbuff_sz;
+    char *currentPos = (char *)sbuff;
+    
+    while(remaining > 0) {
+        // Determine size of this chunk
+        int chunkSize = (remaining > dpmaxdgram()) ? dpmaxdgram() : remaining;
+        
+        // Send this chunk
+        int sent = dpsenddgram(dp, currentPos, chunkSize);
+        if(sent < 0) {
+            return (totalSent > 0) ? totalSent : sent;
+        }
+        
+        // Update counters and position
+        totalSent += sent;
+        remaining -= sent;
+        currentPos += sent;
+    }
+    
+    return totalSent;
 }
 
 static int dpsenddgram(dp_connp dp, void *sbuff, int sbuff_sz){

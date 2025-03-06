@@ -9,7 +9,7 @@
 #include "du-proto.h"
 
 
-#define BUFF_SZ 512
+#define BUFF_SZ 4096
 static char sbuffer[BUFF_SZ];
 static char rbuffer[BUFF_SZ];
 static char full_file_path[FNAME_SZ];
@@ -75,61 +75,145 @@ static int initParams(int argc, char *argv[], prog_config *cfg){
 
 int server_loop(dp_connp dpc, void *sBuff, void *rBuff, int sbuff_sz, int rbuff_sz){
     int rcvSz;
+    duftp_pdu pdu;
+    FILE *f = NULL;
+    bool file_opened = false;
 
-    FILE *f = fopen(full_file_path, "wb+");
-    if(f == NULL){
-        printf("ERROR:  Cannot open file %s\n", full_file_path);
-        exit(-1);
-    }
     if (dpc->isConnected == false){
         perror("Expecting the protocol to be in connect state, but its not");
         exit(-1);
     }
-    //Loop until a disconnect is received, or error hapens
+    
+    //Loop until a disconnect is received, or error happens
     while(1) {
-
         //receive request from client
         rcvSz = dprecv(dpc, rBuff, rbuff_sz);
         if (rcvSz == DP_CONNECTION_CLOSED){
-            fclose(f);
+            if (file_opened) {
+                fclose(f);
+            }
             printf("Client closed connection\n");
             return DP_CONNECTION_CLOSED;
         }
-        fwrite(rBuff, 1, rcvSz, f);
-        rcvSz = rcvSz > 50 ? 50 : rcvSz;    //Just print the first 50 characters max
-
-        printf("========================> \n%.*s\n========================> \n", 
-            rcvSz, (char *)rBuff);
+        
+        // Process based on PDU message type
+        memcpy(&pdu, rBuff, sizeof(duftp_pdu));
+        
+        switch(pdu.msg_type) {
+            case DUFTP_MSG_FILENAME:
+                // Client is sending a filename
+                strncpy(full_file_path, "./infile/", FNAME_SZ);
+                strncat(full_file_path, pdu.filename, FNAME_SZ - strlen(full_file_path) - 1);
+                
+                f = fopen(full_file_path, "wb+");
+                if(f == NULL){
+                    printf("ERROR: Cannot open file %s\n", full_file_path);
+                    // Send error response
+                    pdu.msg_type = DUFTP_MSG_ERROR;
+                    pdu.error_code = DUFTP_ERR_FILE_NOT_FOUND;
+                    dpsend(dpc, &pdu, sizeof(duftp_pdu));
+                } else {
+                    file_opened = true;
+                    // Send acknowledgment
+                    pdu.msg_type = DUFTP_MSG_FILENAME;
+                    pdu.error_code = DUFTP_ERR_NONE;
+                    dpsend(dpc, &pdu, sizeof(duftp_pdu));
+                }
+                printf("Received filename: %s\n", pdu.filename);
+                break;
+                
+            case DUFTP_MSG_DATA:
+                if (!file_opened) {
+                    printf("ERROR: Received data before file was opened\n");
+                    pdu.msg_type = DUFTP_MSG_ERROR;
+                    pdu.error_code = DUFTP_ERR_UNKNOWN;
+                    dpsend(dpc, &pdu, sizeof(duftp_pdu));
+                    continue;
+                }
+                
+                // Write data to file
+                fwrite((char*)rBuff + sizeof(duftp_pdu), 1, pdu.data_size, f);
+                printf("Received %d bytes of data\n", pdu.data_size);
+                break;
+                
+            case DUFTP_MSG_COMPLETE:
+                printf("File transfer complete\n");
+                if (file_opened) {
+                    fclose(f);
+                    file_opened = false;
+                }
+                // Send acknowledgment
+                pdu.msg_type = DUFTP_MSG_COMPLETE;
+                pdu.error_code = DUFTP_ERR_NONE;
+                dpsend(dpc, &pdu, sizeof(duftp_pdu));
+                break;
+                
+            case DUFTP_MSG_ERROR:
+                printf("Received error from client: %d\n", pdu.error_code);
+                break;
+                
+            default:
+                printf("Unknown message type: %d\n", pdu.msg_type);
+                break;
+        }
     }
-
 }
 
-
-
 void start_client(dp_connp dpc){
-    static char sBuff[500];
+    duftp_pdu pdu;
+    char data_buffer[BUFF_SZ - sizeof(duftp_pdu)];
+    int bytes_read;
 
     if(!dpc->isConnected) {
         printf("Client not connected\n");
         return;
     }
 
-
     FILE *f = fopen(full_file_path, "rb");
     if(f == NULL){
-        printf("ERROR:  Cannot open file %s\n", full_file_path);
+        printf("ERROR: Cannot open file %s\n", full_file_path);
         exit(-1);
     }
-    if (dpc->isConnected == false){
-        perror("Expecting the protocol to be in connect state, but its not");
-        exit(-1);
+    
+    // First, send the filename
+    memset(&pdu, 0, sizeof(duftp_pdu));
+    pdu.msg_type = DUFTP_MSG_FILENAME;
+    pdu.error_code = DUFTP_ERR_NONE;
+    strncpy(pdu.filename, strrchr(full_file_path, '/') + 1, FNAME_SZ - 1);
+    
+    dpsend(dpc, &pdu, sizeof(duftp_pdu));
+    
+    // Wait for server acknowledgment
+    dprecv(dpc, &pdu, sizeof(duftp_pdu));
+    if (pdu.msg_type == DUFTP_MSG_ERROR) {
+        printf("Server reported error: %d\n", pdu.error_code);
+        fclose(f);
+        dpdisconnect(dpc);
+        return;
     }
-
-    int bytes = 0;
-
-    while ((bytes = fread(sBuff, 1, sizeof(sBuff), f )) > 0)
-        dpsend(dpc, sBuff, bytes);
-
+    
+    // Send file data in chunks
+    while ((bytes_read = fread(data_buffer, 1, sizeof(data_buffer), f)) > 0) {
+        pdu.msg_type = DUFTP_MSG_DATA;
+        pdu.data_size = bytes_read;
+        
+        // Copy PDU header to send buffer
+        memcpy(sbuffer, &pdu, sizeof(duftp_pdu));
+        // Copy file data after PDU header
+        memcpy(sbuffer + sizeof(duftp_pdu), data_buffer, bytes_read);
+        
+        // Send combined PDU header and data
+        dpsend(dpc, sbuffer, sizeof(duftp_pdu) + bytes_read);
+    }
+    
+    // Send completion message
+    pdu.msg_type = DUFTP_MSG_COMPLETE;
+    pdu.data_size = 0;
+    dpsend(dpc, &pdu, sizeof(duftp_pdu));
+    
+    // Wait for server acknowledgment
+    dprecv(dpc, &pdu, sizeof(duftp_pdu));
+    
     fclose(f);
     dpdisconnect(dpc);
 }
